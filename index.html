@@ -839,9 +839,6 @@
   async function getWorker(){
     if(scanWorker) return scanWorker;
     scanWorker = await Tesseract.createWorker("eng", 1, {
-      workerPath: "https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/worker.min.js",
-      corePath: "https://cdnjs.cloudflare.com/ajax/libs/tesseract.js-core/5.1.0/tesseract-core-simd.wasm.js",
-      langPath: "https://cdnjs.cloudflare.com/ajax/libs/tesseract.js-lang/1.0.0/",
       logger: msg => {
         if(msg.status === "recognizing text"){
           const pct = Math.round((msg.progress || 0) * 100);
@@ -909,7 +906,9 @@
     }catch(err){
       $("scanBar").classList.remove("show");
       $("scanStatus").className = "scanStatus err";
-      $("scanStatus").textContent = "Something went wrong reading that photo. Try again with a clearer image.";
+      const raw = (err && (err.message || String(err))) || "";
+      $("scanStatus").textContent = "Couldn't read that photo (" + (raw || "unknown error") + "). Try again, or use a clearer, better-lit image.";
+      if(scanWorker){ try{ await scanWorker.terminate(); }catch(e){} scanWorker = null; }
     }finally{
       $("scanBtn").disabled = false;
       $("scanInput").value = "";
