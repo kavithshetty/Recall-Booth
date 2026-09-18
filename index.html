@@ -849,7 +849,61 @@
         }
       }
     });
+    // PSM 6 = "assume a single uniform block of text". Works better than the
+    // default automatic layout detection on a notebook photo, where spiral
+    // binding, margin rules and paper texture near the edges can otherwise
+    // get misread as separate text regions or images.
+    await scanWorker.setParameters({ tessedit_pageseg_mode: "6" });
     return scanWorker;
+  }
+
+  // Turn a photographed page into something closer to a flat, high-contrast
+  // scan: cap the resolution to something Tesseract handles well, convert to
+  // grayscale, then push light pixels to white and dark pixels toward black
+  // so faint pencil/blue-pen strokes separate cleanly from paper texture and
+  // background clutter around the edges of the shot.
+  function preprocessImage(file){
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const maxDim = 1800;
+        const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+        const w = Math.max(1, Math.round(img.width * scale));
+        const h = Math.max(1, Math.round(img.height * scale));
+
+        const canvas = document.createElement("canvas");
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, w, h);
+
+        const imgData = ctx.getImageData(0, 0, w, h);
+        const d = imgData.data;
+
+        // grayscale + histogram, so contrast stretching adapts to this photo
+        // rather than using a single fixed threshold for every lighting condition
+        const gray = new Uint8ClampedArray(w * h);
+        let min = 255, max = 0;
+        for(let i = 0, p = 0; i < d.length; i += 4, p++){
+          const g = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
+          gray[p] = g;
+          if(g < min) min = g;
+          if(g > max) max = g;
+        }
+        const range = Math.max(1, max - min);
+        for(let i = 0, p = 0; i < d.length; i += 4, p++){
+          // stretch contrast, then apply a gentle S-curve so midtone paper
+          // texture fades toward white while ink stays dark
+          let v = (gray[p] - min) / range;
+          v = v < 0.5 ? 2*v*v : 1 - 2*(1-v)*(1-v);
+          const out = Math.round(v * 255);
+          d[i] = d[i+1] = d[i+2] = out;
+        }
+        ctx.putImageData(imgData, 0, 0);
+        canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error("couldn't process image")), "image/png");
+      };
+      img.onerror = () => reject(new Error("couldn't open that image file"));
+      img.src = URL.createObjectURL(file);
+    });
   }
 
   function cleanOcrText(raw){
@@ -885,23 +939,28 @@
     $("scanBar").classList.add("show");
     $("scanBarFill").style.width = "0%";
     $("scanStatus").className = "scanStatus";
-    $("scanStatus").textContent = "Warming up the reader…";
+    $("scanStatus").textContent = "Cleaning up the photo…";
     $("scanBtn").disabled = true;
 
     try{
+      const cleanedBlob = await preprocessImage(file);
       const worker = await getWorker();
-      const { data } = await worker.recognize(file);
+      $("scanStatus").textContent = "Warming up the reader…";
+      const { data } = await worker.recognize(cleanedBlob);
       const text = cleanOcrText(data.text || "");
+      const confidence = Math.round(data.confidence || 0);
       $("scanBar").classList.remove("show");
       if(!text){
         $("scanStatus").className = "scanStatus err";
-        $("scanStatus").textContent = "Couldn't make out any text in that photo. Try better light or a closer, flatter shot.";
+        $("scanStatus").textContent = "Couldn't make out any text in that photo. Try flatter, closer, better-lit — plain paper with no background in frame works best.";
       }else{
         const box = $("ownText");
         box.value = box.value.trim() ? box.value.trim() + "\n\n" + text : text;
         renderPreview();
-        $("scanStatus").className = "scanStatus ok";
-        $("scanStatus").textContent = "Added to the text box below — check it over, OCR isn't perfect.";
+        $("scanStatus").className = confidence >= 60 ? "scanStatus ok" : "scanStatus err";
+        $("scanStatus").textContent = confidence >= 60
+          ? "Added to the text box below — check it over, OCR isn't perfect."
+          : "Added below, but the reader wasn't confident — handwriting is hard for it. Please check it carefully against the photo.";
       }
     }catch(err){
       $("scanBar").classList.remove("show");
